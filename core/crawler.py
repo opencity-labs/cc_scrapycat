@@ -16,13 +16,13 @@ from ..utils.robots import is_url_allowed_by_robots
 _thread_local = threading.local()
 
 
-def get_thread_session(user_agent: str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.12; rv:55.0) Gecko/20100101 Firefox/55.0") -> requests.Session:
+def get_thread_session(
+    user_agent: str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.12; rv:55.0) Gecko/20100101 Firefox/55.0",
+) -> requests.Session:
     """Get or create a thread-local requests session for thread-safe parallel requests"""
-    if not hasattr(_thread_local, 'session'):
+    if not hasattr(_thread_local, "session"):
         _thread_local.session = requests.Session()
-        _thread_local.session.headers.update({
-            "User-Agent": user_agent
-        })
+        _thread_local.session.headers.update({"User-Agent": user_agent})
     return _thread_local.session
 
 
@@ -46,9 +46,13 @@ def extract_valid_urls(urls: List[str], page: str, ctx: ScrapyCatContext) -> Lis
         new_url_domain: str = normalize_domain(parsed_new_url.netloc)
 
         # Check if URL is allowed
-        is_root_domain: bool = new_url_domain in ctx.root_domains  # Can crawl recursively
-        is_allowed_domain: bool = new_url_domain in ctx.allowed_domains  # Single page only
-        
+        is_root_domain: bool = (
+            new_url_domain in ctx.root_domains
+        )  # Can crawl recursively
+        is_allowed_domain: bool = (
+            new_url_domain in ctx.allowed_domains
+        )  # Single page only
+
         if not (is_root_domain or is_allowed_domain):
             continue
 
@@ -60,7 +64,7 @@ def extract_valid_urls(urls: List[str], page: str, ctx: ScrapyCatContext) -> Lis
             )
             if not path_allowed:
                 continue
-        
+
         # Skip URLs with GET parameters if configured
         if ctx.skip_get_params and parsed_new_url.query:
             continue
@@ -78,43 +82,57 @@ def extract_valid_urls(urls: List[str], page: str, ctx: ScrapyCatContext) -> Lis
                     if new_url not in ctx.visited_pages:
                         ctx.visited_pages.add(new_url)
                         should_add_pdf = True
-                
+
                 if should_add_pdf:
                     with ctx.scraped_pages_lock:
                         ctx.scraped_pages.append(new_url)
             continue
 
         valid_urls.append(new_url)
-    
+
     return valid_urls
 
 
-def crawl_page(ctx: ScrapyCatContext, cat: StrayCat, page: str, depth: int) -> List[Tuple[str, int]]:
+def crawl_page(
+    ctx: ScrapyCatContext, cat: StrayCat, page: str, depth: int
+) -> List[Tuple[str, int]]:
     """Thread-safe page crawling function - now stores content for later sequential ingestion"""
     with ctx.visited_lock:
         if page in ctx.visited_pages:
             return []
         ctx.visited_pages.add(page)
-    
+
     # Check robots.txt compliance for this page
     if not is_url_allowed_by_robots(ctx, page):
         log.info(f"Page blocked by robots.txt, skipping: {page}")
         return []
-    
+
     new_urls: List[Tuple[str, int]] = []
     try:
         # Use thread-local session for fast parallel requests
         session = get_thread_session(ctx.user_agent)
         response = session.get(page, timeout=ctx.page_timeout)
+
+        # Skip non-successful responses -> don't queue the URL for ingestion
+        if response.status_code != 200:
+            log.warning(f"Skipping {page}: HTTP {response.status_code}")
+            return []
+
         response_text = response.text
+        content_type = response.headers.get("Content-Type", "text/html").split(";")[0]
+
+        # Cache raw bytes so ingestion can reuse them without a second HTTP request
+        if ctx.cache_content:
+            with ctx.scraped_page_contents_lock:
+                ctx.scraped_page_contents[page] = (response.content, content_type)
 
         soup: BeautifulSoup = BeautifulSoup(response_text, "html.parser")
-        
+
         # Store scraped page for later sequential ingestion
         with ctx.scraped_pages_lock:
             ctx.scraped_pages.append(page)
             current_count: int = len(ctx.scraped_pages)
-            
+
         # Send progress update for scraping (only if not scheduled)
         # Done outside the lock to prevent blocking other threads
         # Throttled to avoid flooding the websocket channel
@@ -125,7 +143,7 @@ def crawl_page(ctx: ScrapyCatContext, cat: StrayCat, page: str, depth: int) -> L
                 if now - ctx.last_update_time > 0.5:  # Update every 0.5 seconds max
                     ctx.last_update_time = now
                     should_send = True
-            
+
             if should_send:
                 # Get worker name for debugging
                 worker_name = threading.current_thread().name
@@ -138,11 +156,13 @@ def crawl_page(ctx: ScrapyCatContext, cat: StrayCat, page: str, depth: int) -> L
                             worker_name = f"Worker {parts[-1]}"
                     except:
                         pass
-                
-                cat.send_ws_message(f"Scraped {current_count} pages - {worker_name} scraping: {page}")
-        
+
+                cat.send_ws_message(
+                    f"Scraped {current_count} pages - {worker_name} scraping: {page}"
+                )
+
         urls: List[str] = [link["href"] for link in soup.select("a[href]")]
-        
+
         # Extract valid URLs using the helper function
         valid_urls: List[str] = extract_valid_urls(urls, page, ctx)
 
@@ -151,7 +171,7 @@ def crawl_page(ctx: ScrapyCatContext, cat: StrayCat, page: str, depth: int) -> L
         for url in valid_urls:
             parsed_url: urllib.parse.ParseResult = urllib.parse.urlparse(url)
             url_domain: str = normalize_domain(parsed_url.netloc)
-            
+
             if url_domain in ctx.root_domains:
                 # Root domain URL - add for recursive crawling
                 recursive_urls.append(url)
@@ -162,7 +182,7 @@ def crawl_page(ctx: ScrapyCatContext, cat: StrayCat, page: str, depth: int) -> L
                     if url not in ctx.visited_pages:
                         ctx.visited_pages.add(url)
                         should_add = True
-                
+
                 if should_add:
                     # Add to scraped pages for ingestion
                     with ctx.scraped_pages_lock:
@@ -177,13 +197,13 @@ def crawl_page(ctx: ScrapyCatContext, cat: StrayCat, page: str, depth: int) -> L
                 # Only continue recursion if we haven't reached max_depth
                 if ctx.max_depth == -1 or (depth + 1) <= ctx.max_depth:
                     unvisited_urls.append((url, depth + 1))
-        
+
         # Add unvisited URLs to new_urls
         new_urls.extend(unvisited_urls)
-                            
+
     except Exception as e:
         log.error(f"Page crawl failed: {page} - {str(e)}")
-    
+
     return new_urls
 
 
@@ -193,12 +213,12 @@ def crawler(ctx: ScrapyCatContext, cat: StrayCat, start_urls: List[str]) -> None
     with ThreadPoolExecutor(max_workers=ctx.max_workers) as executor:
         # Track submitted futures and their depths
         future_to_url: Dict[Any, Tuple[str, int]] = {}
-        
+
         # Submit all initial URLs
         for start_url in start_urls:
             future = executor.submit(crawl_page, ctx, cat, start_url, 0)
             future_to_url[future] = (start_url, 0)
-        
+
         while future_to_url:
             # Check max_pages limit before processing more futures
             with ctx.visited_lock:
@@ -208,49 +228,62 @@ def crawler(ctx: ScrapyCatContext, cat: StrayCat, start_urls: List[str]) -> None
                     for remaining_future in future_to_url.keys():
                         remaining_future.cancel()
                     break
-            
+
             # Collect all futures that complete within the timeout window
             # This allows true parallel processing instead of one-at-a-time
             completed_in_batch: List[Any] = []
-            
+
             # Use wait() instead of as_completed() to efficiently wait for the first batch of results
             # This avoids creating a new iterator and checking .done() on all futures repeatedly
-            done, not_done = wait(future_to_url.keys(), timeout=ctx.page_timeout, return_when=FIRST_COMPLETED)
-            
+            done, not_done = wait(
+                future_to_url.keys(),
+                timeout=ctx.page_timeout,
+                return_when=FIRST_COMPLETED,
+            )
+
             if done:
                 completed_in_batch = list(done)
             else:
                 # Timeout occurred - no futures completed
                 # Cancel all remaining futures and exit gracefully
-                log.warning(f"Timeout waiting for {len(future_to_url)} futures - cancelling remaining tasks")
+                log.warning(
+                    f"Timeout waiting for {len(future_to_url)} futures - cancelling remaining tasks"
+                )
                 for future in list(future_to_url.keys()):
                     future.cancel()
                     url, depth = future_to_url.pop(future)
                     ctx.failed_pages.append(url)
                     log.warning(f"URL cancelled due to timeout: {url}")
                 break
-            
+
             # Process all completed futures in this batch
             for completed_future in completed_in_batch:
                 if completed_future not in future_to_url:
                     continue  # Already processed
-                    
+
                 url, depth = future_to_url.pop(completed_future)
-                
+
                 try:
                     new_urls: List[Tuple[str, int]] = completed_future.result()
-                    
+
                     # Submit new URLs for crawling (if under limits)
                     for new_url, new_depth in new_urls:
                         # Check limits before submitting new tasks
                         with ctx.visited_lock:
-                            if ctx.max_pages != -1 and len(ctx.visited_pages) >= ctx.max_pages:
+                            if (
+                                ctx.max_pages != -1
+                                and len(ctx.visited_pages) >= ctx.max_pages
+                            ):
                                 break
-                                
-                        if (ctx.max_depth == -1 or new_depth <= ctx.max_depth):
-                            future = executor.submit(crawl_page, ctx, cat, new_url, new_depth)
+
+                        if ctx.max_depth == -1 or new_depth <= ctx.max_depth:
+                            future = executor.submit(
+                                crawl_page, ctx, cat, new_url, new_depth
+                            )
                             future_to_url[future] = (new_url, new_depth)
-                            
+
                 except Exception as e:
-                    log.error(f"URL processing failed: {url} (depth {depth}) - {str(e)}")
+                    log.error(
+                        f"URL processing failed: {url} (depth {depth}) - {str(e)}"
+                    )
                     ctx.failed_pages.append(url)

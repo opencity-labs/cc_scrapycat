@@ -40,6 +40,7 @@ On the plugin settings you can set:
 - **Ingest PDF**: Include PDFs in the ingestion
 - **Skip GET Parameters**: Ignore URLs with ?param=value to prevent duplicates or infinite loops
 - **Use Crawl4AI**: Enables Crawl4AI for better content extraction and JavaScript rendering during ingestion (requires setup via `@scrapycat crawl4ai-setup`)
+- **Cache Fetched Content**: Reuses the HTML already downloaded during the crawl phase at ingestion time, avoiding a second HTTP request per page (default: False). Useful for sites that rate-limit rapid repeated requests or if pages are being scraped successfully but appear empty after ingestion, try enabling this
 - **Follow Robots.txt**: Respect robots.txt files when crawling (default: False)
 - **Max Depth**: How many levels of links to follow:
   - `-1`: No limit (default)

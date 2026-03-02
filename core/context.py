@@ -1,4 +1,4 @@
-from typing import Dict, Set, List, Optional
+from typing import Dict, Set, List, Optional, Tuple
 from threading import Lock
 from urllib.robotparser import RobotFileParser
 import uuid
@@ -7,41 +7,67 @@ import uuid
 class ScrapyCatContext:
     def __init__(self) -> None:
         self.visited_pages: Set[str] = set()  # Set of visited pages during crawling
-        self.root_domains: Set[str] = set()  # Set of normalized root domains (for recursive crawling)
-        self.allowed_paths: Set[str] = set()  # Set of allowed base paths for URL filtering
+        self.root_domains: Set[str] = (
+            set()
+        )  # Set of normalized root domains (for recursive crawling)
+        self.allowed_paths: Set[str] = (
+            set()
+        )  # Set of allowed base paths for URL filtering
         self.ingest_pdf: bool = False  # Whether to ingest PDFs
         self.skip_get_params: bool = False  # Skip URLs with GET parameters
         self.max_depth: int = -1  # Max recursion/crawling depth (-1 for unlimited)
         self.max_pages: int = -1  # Max pages to crawl (-1 for unlimited)
-        self.allowed_domains: Set[str] = set()  # Set of allowed domains (single page scraping only)
-        self.use_crawl4ai: bool = False  # Whether to use crawl4ai for content extraction
+        self.allowed_domains: Set[str] = (
+            set()
+        )  # Set of allowed domains (single page scraping only)
+        self.use_crawl4ai: bool = (
+            False  # Whether to use crawl4ai for content extraction
+        )
         self.follow_robots_txt: bool = False  # Whether to follow robots.txt
-        self.robots_cache: Dict[str, Optional[RobotFileParser]] = {}  # Cache robots.txt parsers by domain
+        self.robots_cache: Dict[str, Optional[RobotFileParser]] = (
+            {}
+        )  # Cache robots.txt parsers by domain
         self.visited_lock: Lock = Lock()  # Thread-safe access to visited_pages
-        self.max_workers: int = 1   # Configurable thread pool size
-        self.skip_extensions: List[str] = []  # List of file extensions to skip during crawling
+        self.max_workers: int = 1  # Configurable thread pool size
+        self.skip_extensions: List[str] = (
+            []
+        )  # List of file extensions to skip during crawling
         self.chunk_size: int = 512  # Size of text chunks for ingestion
         self.chunk_overlap: int = 128  # Overlap between consecutive chunks
         self.page_timeout: int = 30  # Timeout for page loading operations
-        self.user_agent: str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.12; rv:55.0) Gecko/20100101 Firefox/55.0"  # User agent for HTTP requests
+        self.user_agent: str = (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.12; rv:55.0) Gecko/20100101 Firefox/55.0"  # User agent for HTTP requests
+        )
+        self.cache_content: bool = (
+            False  # Reuse crawler-fetched bytes at ingestion time
+        )
         # Store scraped pages for sequential ingestion
         self.scraped_pages: List[str] = []
         self.scraped_pages_lock: Lock = Lock()  # Thread-safe access to scraped_pages
-        
+        # url -> (raw_bytes, content_type); populated when cache_content is True
+        self.scraped_page_contents: Dict[str, Tuple[bytes, str]] = {}
+        self.scraped_page_contents_lock: Lock = Lock()
+
         # UI update throttling
         self.last_update_time: float = 0.0
         self.update_lock: Lock = Lock()
-        
+
         # Session tracking fields for coordination with other plugins
-        self.session_id: str = str(uuid.uuid4())  # Unique identifier for this scraping session
+        self.session_id: str = str(
+            uuid.uuid4()
+        )  # Unique identifier for this scraping session
         self.command: str = ""  # The command that triggered this scraping session
-        self.scheduled: bool = False  # Whether this command is running from scheduler (True) or chat (False)
+        self.scheduled: bool = (
+            False  # Whether this command is running from scheduler (True) or chat (False)
+        )
         self.failed_pages: List[str] = []  # URLs that failed during ingestion
-        self.ignored_pages: List[str] = []  # URLs that were scraped but ignored (e.g. unchanged content)
-        
+        self.ignored_pages: List[str] = (
+            []
+        )  # URLs that were scraped but ignored (e.g. unchanged content)
+
         # Custom fields added by hooks - allows plugins to extend context dynamically
         self._custom_fields: Dict[str, any] = {}
-    
+
     def to_hook_context(self) -> Dict[str, any]:
         """Create a serializable context data dictionary for hook execution"""
         # Start with standard fields
@@ -56,21 +82,29 @@ class ScrapyCatContext:
             "chunk_overlap": int(self.chunk_overlap),
             "page_timeout": int(self.page_timeout),
             "skip_extensions": [str(ext) for ext in self.skip_extensions],
-            "user_agent": str(self.user_agent)
+            "user_agent": str(self.user_agent),
         }
         # Merge custom fields at the top level so hooks can access them directly
         context.update(self._custom_fields)
         return context
-    
+
     def update_from_hook_context(self, context_data: Dict[str, any]) -> None:
         """Update context with data returned from hook execution"""
         # Known fields - explicitly update
         known_fields = {
-            "session_id", "command", "scheduled", "scraped_pages", "failed_pages",
-            "ignored_pages", "chunk_size", "chunk_overlap", "page_timeout",
-            "user_agent", "skip_extensions"
+            "session_id",
+            "command",
+            "scheduled",
+            "scraped_pages",
+            "failed_pages",
+            "ignored_pages",
+            "chunk_size",
+            "chunk_overlap",
+            "page_timeout",
+            "user_agent",
+            "skip_extensions",
         }
-        
+
         self.session_id = context_data.get("session_id", self.session_id)
         self.command = context_data.get("command", self.command)
         self.scheduled = context_data.get("scheduled", self.scheduled)
@@ -82,17 +116,17 @@ class ScrapyCatContext:
         self.page_timeout = context_data.get("page_timeout", self.page_timeout)
         self.user_agent = context_data.get("user_agent", self.user_agent)
         self.skip_extensions = context_data.get("skip_extensions", self.skip_extensions)
-        
+
         # Custom fields - any field not in known_fields is stored in _custom_fields
         # This allows hooks to add arbitrary data that persists across hook calls
         for key, value in context_data.items():
             if key not in known_fields:
                 self._custom_fields[key] = value
-    
+
     def get_custom_field(self, key: str, default=None):
         """Get a custom field value from the context"""
         return self._custom_fields.get(key, default)
-    
+
     def set_custom_field(self, key: str, value: any) -> None:
         """Set a custom field value in the context"""
         self._custom_fields[key] = value

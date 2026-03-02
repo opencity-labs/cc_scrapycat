@@ -11,11 +11,12 @@ try:
 except ImportError:
     # Fallback if import fails
     import requests
-    def get_thread_session(user_agent: str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.12; rv:55.0) Gecko/20100101 Firefox/55.0"):
+
+    def get_thread_session(
+        user_agent: str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.12; rv:55.0) Gecko/20100101 Firefox/55.0",
+    ):
         session = requests.Session()
-        session.headers.update({
-            "User-Agent": user_agent
-        })
+        session.headers.update({"User-Agent": user_agent})
         return session
 
 
@@ -27,10 +28,10 @@ def load_robots_txt(ctx: ScrapyCatContext, domain: str) -> Optional[RobotFilePar
     """
     if domain in ctx.robots_cache:
         return ctx.robots_cache[domain]
-    
+
     try:
         # Try both http and https
-        for protocol in ['https', 'http']:
+        for protocol in ["https", "http"]:
             robots_url = f"{protocol}://{domain}/robots.txt"
             try:
                 # Use thread-local session instead of shared session
@@ -46,12 +47,12 @@ def load_robots_txt(ctx: ScrapyCatContext, domain: str) -> Optional[RobotFilePar
             except Exception as e:
                 log.warning(f"Failed to load robots.txt from {robots_url}: {e}")
                 continue
-        
+
         # If we get here, robots.txt is not accessible
         log.info(f"No accessible robots.txt found for {domain}, allowing all URLs")
         ctx.robots_cache[domain] = None
         return None
-        
+
     except Exception as e:
         log.warning(f"Error loading robots.txt for {domain}: {e}")
         ctx.robots_cache[domain] = None
@@ -65,17 +66,17 @@ def is_url_allowed_by_robots(ctx: ScrapyCatContext, url: str) -> bool:
     """
     if not ctx.follow_robots_txt:
         return True
-    
+
     parsed_url = urllib.parse.urlparse(url)
     domain = normalize_domain(parsed_url.netloc)
-    
+
     # Get robots.txt parser for this domain
     robots_parser = load_robots_txt(ctx, domain)
-    
+
     # If no robots.txt available, allow the URL
     if robots_parser is None:
         return True
-    
+
     # Check if the URL is allowed for our user agent
     user_agent = ctx.user_agent
     return robots_parser.can_fetch(user_agent, url)

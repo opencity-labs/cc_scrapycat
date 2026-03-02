@@ -4,50 +4,66 @@ from cat.log import log
 from cat.looking_glass.stray_cat import StrayCat
 import os
 import asyncio
+import time
 import urllib.parse
 
 from .core.context import ScrapyCatContext
-from .utils.url_utils import clean_url, normalize_url_with_protocol, normalize_domain, validate_url
+from .utils.url_utils import (
+    clean_url,
+    normalize_url_with_protocol,
+    normalize_domain,
+    validate_url,
+)
 from .utils.robots import load_robots_txt
 from .integrations.crawl4ai import run_crawl4ai_setup, crawl4i, CRAWL4AI_AVAILABLE
 from .core.crawler import crawler
 
 
-def process_scrapycat_command(user_message: str, cat: StrayCat, scheduled: bool = False) -> str:
+def process_scrapycat_command(
+    user_message: str, cat: StrayCat, scheduled: bool = False
+) -> str:
     """Process a scrapycat command and return the result message"""
-    
+
     settings: Dict[str, Any] = cat.mad_hatter.get_plugin().load_settings()
 
     # Parse command arguments
     parts: List[str] = user_message.split()
     if len(parts) < 2:
         return "Usage: @scrapycat <url1> [url2 ...] [--allow <allowed_url1> [allowed_url2 ...]]"
-    
+
     # Find --allow flag position
     allow_index: int = -1
     for i, part in enumerate(parts):
         if part == "--allow":
             allow_index = i
             break
-    
+
     # Extract starting URLs and allowed URLs
     if allow_index == -1:
         # No --allow flag, all URLs after @scrapycat are starting URLs
-        starting_urls: List[str] = [normalize_url_with_protocol(clean_url(url)) for url in parts[1:] if validate_url(url)]
+        starting_urls: List[str] = [
+            normalize_url_with_protocol(clean_url(url))
+            for url in parts[1:]
+            if validate_url(url)
+        ]
         command_allowed_urls: List[str] = []
     else:
         # Split at --allow flag
-        starting_urls = [normalize_url_with_protocol(clean_url(url)) for url in parts[1:allow_index] if validate_url(url)]
+        starting_urls = [
+            normalize_url_with_protocol(clean_url(url))
+            for url in parts[1:allow_index]
+            if validate_url(url)
+        ]
         # Allow more flexible validation for allowed URLs (domains without protocols are OK)
         command_allowed_urls = []
-        for url in parts[allow_index + 1:]:
+        for url in parts[allow_index + 1 :]:
             cleaned_url: str = clean_url(url)
             if validate_url(cleaned_url):
                 command_allowed_urls.append(cleaned_url)
             else:
                 # Log validation issues for debugging
                 log.warning(f"Invalid allowed URL ignored: {cleaned_url}")
-    
+
     if not starting_urls:
         log.error("No valid starting URLs provided")
         return "Error: No valid starting URLs provided"
@@ -61,33 +77,42 @@ def process_scrapycat_command(user_message: str, cat: StrayCat, scheduled: bool 
     ctx.max_depth = settings.get("max_depth", -1)
     ctx.use_crawl4ai = settings.get("use_crawl4ai", False)
     ctx.follow_robots_txt = settings.get("follow_robots_txt", False)
+    ctx.cache_content = settings.get("cache_content", False)
 
     # Build allowed domains set (for single-page scraping only, no recursion)
     # 1. Add domains from settings (normalize them for consistency)
     settings_allowed_urls: List[str] = [
-        normalize_url_with_protocol(url.strip()) for url in settings.get("allowed_extra_roots", "").split(",")
+        normalize_url_with_protocol(url.strip())
+        for url in settings.get("allowed_extra_roots", "").split(",")
         if url.strip() and validate_url(url.strip())
     ]
     for url in settings_allowed_urls:
         ctx.allowed_domains.add(normalize_domain(url))
-    
+
     # 2. Add domains from command --allow argument
     for url in command_allowed_urls:
         normalized_url = normalize_url_with_protocol(url)
         ctx.allowed_domains.add(normalize_domain(normalized_url))
 
     ctx.max_pages = settings.get("max_pages", -1)
-    ctx.max_workers = settings.get("max_workers", 1)  # Default to 1 if not set
-    ctx.chunk_size = settings.get("chunk_size", 512)  # Default to 512 if not set
-    ctx.chunk_overlap = settings.get("chunk_overlap", 128)  # Default to 128 if not set
-    ctx.page_timeout = settings.get("page_timeout", 30)  # Default to 30 seconds if not set
-    ctx.user_agent = settings.get("user_agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.12; rv:55.0) Gecko/20100101 Firefox/55.0")  # User agent string
-    
+    ctx.max_workers = settings.get("max_workers", 1)
+    ctx.chunk_size = settings.get("chunk_size", 512)
+    ctx.chunk_overlap = settings.get("chunk_overlap", 128)
+    ctx.page_timeout = settings.get("page_timeout", 30)
+    ctx.user_agent = settings.get(
+        "user_agent",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.12; rv:55.0) Gecko/20100101 Firefox/55.0",
+    )
+
     # Parse skip extensions from settings and normalize them (ensure they all start with a dot)
-    skip_extensions_str = settings.get("skip_extensions", ".jpg,.jpeg,.png,.gif,.bmp,.svg,.webp,.ico,.zip,.ods,.odt,.xls,.p7m,.rar,.mp3,.xml,.7z,.exe,.doc")
+    skip_extensions_str = settings.get(
+        "skip_extensions",
+        ".jpg,.jpeg,.png,.gif,.bmp,.svg,.webp,.ico,.zip,.ods,.odt,.xls,.p7m,.rar,.mp3,.xml,.7z,.exe,.doc",
+    )
     ctx.skip_extensions = [
-        ext.strip() if ext.strip().startswith('.') else f'.{ext.strip()}'
-        for ext in skip_extensions_str.split(",") if ext.strip()
+        ext.strip() if ext.strip().startswith(".") else f".{ext.strip()}"
+        for ext in skip_extensions_str.split(",")
+        if ext.strip()
     ]
     # Check if crawl4ai is requested but not available
     if ctx.use_crawl4ai and not CRAWL4AI_AVAILABLE:
@@ -96,15 +121,13 @@ def process_scrapycat_command(user_message: str, cat: StrayCat, scheduled: bool 
         ctx.use_crawl4ai = False
 
     # Extract root domains and paths from starting URLs
-    ctx.root_domains = set()
-    ctx.allowed_paths = set()
     for url in starting_urls:
         parsed_url: urllib.parse.ParseResult = urllib.parse.urlparse(url)
         ctx.root_domains.add(normalize_domain(parsed_url.netloc))
         # Add the path (or "/" if empty) to allowed paths
         path: str = parsed_url.path or "/"
         ctx.allowed_paths.add(path)
-    
+
     # Preload robots.txt for all starting domains if robots.txt following is enabled
     if ctx.follow_robots_txt:
         all_domains = ctx.root_domains.union(ctx.allowed_domains)
@@ -112,7 +135,9 @@ def process_scrapycat_command(user_message: str, cat: StrayCat, scheduled: bool 
             load_robots_txt(ctx, domain)
         log.info(f"Robots.txt preloaded for {len(all_domains)} domains")
 
-    log.info(f"ScrapyCat started: {len(starting_urls)} URLs, max_pages={ctx.max_pages}, max_depth={ctx.max_depth}, workers={ctx.max_workers}, robots.txt={ctx.follow_robots_txt}")
+    log.info(
+        f"ScrapyCat started: {len(starting_urls)} URLs, max_pages={ctx.max_pages}, max_depth={ctx.max_depth}, workers={ctx.max_workers}, robots.txt={ctx.follow_robots_txt}"
+    )
     if ctx.allowed_domains:
         log.info(f"Single-page domains configured: {len(ctx.allowed_domains)} domains")
     if ctx.root_domains:
@@ -121,99 +146,133 @@ def process_scrapycat_command(user_message: str, cat: StrayCat, scheduled: bool 
     # Fire before_scraping hook with serializable context data
     try:
         context_data = ctx.to_hook_context()
-        context_data = cat.mad_hatter.execute_hook("scrapycat_before_scraping", context_data, cat=cat)
+        context_data = cat.mad_hatter.execute_hook(
+            "scrapycat_before_scraping", context_data, cat=cat
+        )
         ctx.update_from_hook_context(context_data)
     except Exception as hook_error:
         log.warning(f"Error executing before_scraping hook: {hook_error}")
 
     # Start crawling from all starting URLs
     try:
-        # Record start time for the whole crawling+ingestion operation
-        import time
         start_time = time.time()
         crawler(ctx, cat, starting_urls)
-        
-        log.info(f"Crawling completed: {len(ctx.scraped_pages)} pages scraped, {len(ctx.failed_pages)} failed/timed out")
-        
+
+        log.info(
+            f"Crawling completed: {len(ctx.scraped_pages)} pages scraped, {len(ctx.failed_pages)} failed/timed out"
+        )
+
         # Fire after_scraping hook with serializable context data
         try:
             context_data = ctx.to_hook_context()
-            log.debug(f"Firing after_scraping hook with context data: session_id={context_data['session_id']}, command={context_data['command']}")
-            context_data = cat.mad_hatter.execute_hook("scrapycat_after_scraping", context_data, cat=cat)
+            log.debug(
+                f"Firing after_scraping hook with context data: session_id={context_data['session_id']}, command={context_data['command']}"
+            )
+            context_data = cat.mad_hatter.execute_hook(
+                "scrapycat_after_scraping", context_data, cat=cat
+            )
             ctx.update_from_hook_context(context_data)
         except Exception as hook_error:
             log.warning(f"Error executing after_scraping hook: {hook_error}")
-        
+
         # Sequential ingestion after parallel scraping is complete
         if not ctx.scraped_pages:
             # Compute elapsed time even if no pages scraped
             elapsed_seconds = time.time() - start_time
             minutes = round(elapsed_seconds / 60.0, 2)
-            
+
             if ctx.failed_pages:
                 return f"No pages were successfully scraped. {len(ctx.failed_pages)} pages failed or timed out in {minutes} minutes."
             return f"No pages were successfully scraped in {minutes} minutes."
-        
+
         ingested_count: int = 0
-        for i, scraped_url in enumerate(ctx.scraped_pages):
+        for scraped_url in ctx.scraped_pages:
             try:
+                metadata: Dict[str, str] = {
+                    "url": scraped_url,
+                    "source": scraped_url,
+                    "session_id": ctx.session_id,
+                    "command": ctx.command,
+                }
+
                 if ctx.use_crawl4ai and CRAWL4AI_AVAILABLE:
-                    # Use crawl4ai for content extraction
+                    # Use crawl4ai for content extraction (renders JavaScript – always re-fetches)
                     try:
                         markdown_content: str = asyncio.run(crawl4i(scraped_url))
                         output_file: str = "temp_crawl4ai_content.md"
                         with open(output_file, "w", encoding="utf-8") as f:
                             f.write(markdown_content)
-                        metadata: Dict[str, str] = {
-                            "url": scraped_url, 
-                            "source": scraped_url,
-                            "session_id": ctx.session_id,
-                            "command": ctx.command
-                        }
-                        cat.rabbit_hole.ingest_file(cat, output_file, ctx.chunk_size, ctx.chunk_overlap, metadata)
+                        cat.rabbit_hole.ingest_file(
+                            cat,
+                            output_file,
+                            ctx.chunk_size,
+                            ctx.chunk_overlap,
+                            metadata,
+                        )
                         os.remove(output_file)
                         ingested_count += 1
                     except Exception as crawl4ai_error:
-                        log.warning(f"crawl4ai failed for {scraped_url}, falling back to default method: {str(crawl4ai_error)}")
-                        # Fallback to default method
-                        metadata: Dict[str, str] = {
-                            "url": scraped_url,
-                            "source": scraped_url, 
-                            "session_id": ctx.session_id,
-                            "command": ctx.command
-                        }
-                        cat.rabbit_hole.ingest_file(cat, scraped_url, ctx.chunk_size, ctx.chunk_overlap, metadata)
+                        log.warning(
+                            f"crawl4ai failed for {scraped_url}, falling back to default method: {str(crawl4ai_error)}"
+                        )
+                        cat.rabbit_hole.ingest_file(
+                            cat,
+                            scraped_url,
+                            ctx.chunk_size,
+                            ctx.chunk_overlap,
+                            metadata,
+                        )
                         ingested_count += 1
-                else:
-                    # Use default ingestion method
-                    metadata: Dict[str, str] = {
-                        "url": scraped_url,
-                        "source": scraped_url,
-                        "session_id": ctx.session_id,
-                        "command": ctx.command
-                    }
-                    cat.rabbit_hole.ingest_file(cat, scraped_url, ctx.chunk_size, ctx.chunk_overlap, metadata)
+
+                elif scraped_url in ctx.scraped_page_contents:
+                    # Use cached bytes, no second HTTP request needed
+                    content_bytes, content_type = ctx.scraped_page_contents[scraped_url]
+                    docs = cat.rabbit_hole.string_to_docs(
+                        cat=cat,
+                        file_bytes=content_bytes,
+                        source=scraped_url,
+                        content_type=content_type,
+                        chunk_size=ctx.chunk_size,
+                        chunk_overlap=ctx.chunk_overlap,
+                    )
+                    cat.rabbit_hole.store_documents(
+                        cat=cat, docs=docs, source=scraped_url, metadata=metadata
+                    )
                     ingested_count += 1
-                
+
+                else:
+                    cat.rabbit_hole.ingest_file(
+                        cat, scraped_url, ctx.chunk_size, ctx.chunk_overlap, metadata
+                    )
+                    ingested_count += 1
+
                 # Send progress update
                 if not ctx.scheduled:
-                    cat.send_ws_message(f"Ingested {ingested_count}/{len(ctx.scraped_pages)} pages - Currently processing: {scraped_url}")
-                
+                    cat.send_ws_message(
+                        f"Ingested {ingested_count}/{len(ctx.scraped_pages)} pages - Currently processing: {scraped_url}"
+                    )
+
             except Exception as e:
                 ctx.failed_pages.append(scraped_url)  # Track failed pages in context
                 log.error(f"Page ingestion failed: {scraped_url} - {str(e)}")
                 # Continue with next page even if one fails
-        
-        log.info(f"Ingestion completed: {ingested_count} successful, {len(ctx.failed_pages)} failed")
+
+        log.info(
+            f"Ingestion completed: {ingested_count} successful, {len(ctx.failed_pages)} failed"
+        )
         # Compute elapsed time in minutes (rounded to 2 decimal places)
         elapsed_seconds = time.time() - start_time
         minutes = round(elapsed_seconds / 60.0, 2)
-        
+
         # Build response message
         if ctx.failed_pages:
-            response: str = f"{ingested_count} URLs successfully imported, {len(ctx.failed_pages)} failed or timed out in {minutes} minutes"
+            response: str = (
+                f"{ingested_count} URLs successfully imported, {len(ctx.failed_pages)} failed or timed out in {minutes} minutes"
+            )
         else:
-            response: str = f"{ingested_count} URLs successfully imported in {minutes} minutes"
+            response: str = (
+                f"{ingested_count} URLs successfully imported in {minutes} minutes"
+            )
 
     except Exception as e:
         error_msg = str(e)
@@ -223,18 +282,23 @@ def process_scrapycat_command(user_message: str, cat: StrayCat, scheduled: bool 
         # Fire after_ingestion hook with serializable context data
         try:
             context_data = ctx.to_hook_context()
-            log.debug(f"Firing after_ingestion hook with context data: session_id={context_data['session_id']}, command={context_data['command']}")
-            cat.mad_hatter.execute_hook("scrapycat_after_ingestion", context_data, cat=cat)
+            log.debug(
+                f"Firing after_ingestion hook with context data: session_id={context_data['session_id']}, command={context_data['command']}"
+            )
+            cat.mad_hatter.execute_hook(
+                "scrapycat_after_ingestion", context_data, cat=cat
+            )
             ctx.update_from_hook_context(context_data)
         except Exception as hook_error:
             log.warning(f"Error executing after_ingestion hook: {hook_error}")
-        
+
     return response
+
 
 @hook
 def after_cat_bootstrap(cat):
     settings = cat.mad_hatter.get_plugin().load_settings()
-    if settings.get('use_crawl4ai', False):
+    if settings.get("use_crawl4ai", False):
         run_crawl4ai_setup()
 
 
@@ -264,13 +328,16 @@ def agent_fast_reply(fast_reply: Dict, cat: StrayCat) -> Dict:
 
 # Empty hook placeholders to skip the warning about missing hooks
 
+
 @hook()
 def scrapycat_before_scraping(context: Dict[str, Any], cat: StrayCat):
     return context
 
+
 @hook()
 def scrapycat_after_scraping(context: Dict[str, Any], cat: StrayCat):
     return context
+
 
 @hook()
 def scrapycat_after_ingestion(context: Dict[str, Any], cat: StrayCat):
